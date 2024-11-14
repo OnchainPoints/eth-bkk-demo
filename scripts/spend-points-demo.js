@@ -32,15 +32,6 @@ async function main() {
   console.log("Updating OnchainPoints address in SpendingDemo...");
   await spendingDemo.updateOnchainPointsAddress(onchainPointsAddress);
 
-  const OnchainPoints = await ethers.getContractFactory("OnchainPoints");
-  const onchainPoints = OnchainPoints.attach(onchainPointsAddress);
-
-  const maxDailySpending = await onchainPoints.getMaxDailySpending(user.address);
-  console.log("Max daily spending:", maxDailySpending);
-
-  const userAvailableSpending = await onchainPoints.getAvailableSpending(user.address);
-  console.log("User available spending:", userAvailableSpending);
-
   // Prepare spending request
   const amount = ethers.parseEther("1");
   const deadline = Math.floor(Date.now() / 1000) + 3600;
