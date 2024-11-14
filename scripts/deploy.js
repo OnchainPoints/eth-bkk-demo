@@ -13,6 +13,15 @@ async function deploy() {
         kind: "uups"
     });
 
+    await onchainPoints.setMaxDailySpending([100, 100]);
+    await onchainPoints.updateMaxDailySpendingCap(ethers.parseEther("100"));
+
+    const sendEthTx = await owner.sendTransaction({
+        to: onchainPoints.target,
+        value: ethers.parseUnits("100", 18),
+    });
+    await sendEthTx.wait();
+
     console.log("Owner address: ", owner.address);
     console.log("WPOP address: ", token.target);
     console.log("Onchain Points address: ", onchainPoints.target);
