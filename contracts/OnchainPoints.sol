@@ -96,9 +96,6 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
     // Mapping to store daily spendings for each user
     mapping(uint256 => mapping(address => uint256)) public dailySpendings;
 
-    // Mapping to store authorized addresses
-    mapping(address => bool) public authorizedAddresses;
-
     // Mapping to store admin addresses
     mapping(address => bool) public adminAddresses;
 
@@ -108,7 +105,6 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
     // Events
     event ActivityCreated(string name);
     event ActivityClaimed(string name, address user, uint256 amount);
-    event AuthorizedAddressUpdated(address authorizedAddress, bool allowed);
     event BalanceUpdated(address user, uint256 amount);
     event ReferenceBalanceUpdated(address user, uint256 amount);
     event MaxSpendingUpdated(uint256[2] maxSpendingNumDen);
@@ -125,6 +121,11 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
 
     // Remaining points available
     uint256 public remainingPoints;
+
+    uint256 public INITIAL_BALANCE;
+    uint256 public authorizedAddressesTotalSpendingLimit;
+    mapping(address => uint256) public authorizedAddressesTotalSpendings;
+    mapping(address => bool) public initialBalanceSet;
 
     /**
      * @dev Struct to represent a delegated spending request
@@ -172,6 +173,25 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
         __EIP712_init("OnchainPointsContract", "0.1");
         __Ownable_init(initialOwner);
         __UUPSUpgradeable_init();
+        INITIAL_BALANCE = 100 * 10 ** 18;
+        authorizedAddressesTotalSpendingLimit = 100 * 10 ** 18;
+    }
+
+    /**
+     * @dev Sets the initial balance
+     * @param _initialBalance The new initial balance
+     */
+    function setInitialBalance(uint256 _initialBalance) public onlyOwner {
+        INITIAL_BALANCE = _initialBalance;
+    }
+
+
+    /**
+     * @dev Sets the total spending limit for authorized addresses
+     * @param _authorizedAddressesTotalSpendingLimit The new total spending limit
+     */ 
+    function setAuthorizedAddressesTotalSpendingLimit(uint256 _authorizedAddressesTotalSpendingLimit) public onlyOwner {
+        authorizedAddressesTotalSpendingLimit = _authorizedAddressesTotalSpendingLimit;
     }
 
     /**
@@ -180,6 +200,9 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
      * @return The total balance
      */
     function getTotalBalance(address user) public view returns(uint256) {
+        if (!initialBalanceSet[user]) {
+            return INITIAL_BALANCE + userBalance[user] + getRemainingPointsEarnedFromStaking(user);
+        }
         return userBalance[user] + getRemainingPointsEarnedFromStaking(user);
     }
 
@@ -491,23 +514,6 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
         }
     }
 
-    /**
-     * @dev Adds an authorized address
-     * @param _authorizedAddress The address to authorize
-     */
-    function addAuthorizedAddress(address _authorizedAddress) public onlyOwner {
-        authorizedAddresses[_authorizedAddress] = true;
-        emit AuthorizedAddressUpdated(_authorizedAddress, true);
-    }
-
-    /**
-     * @dev Removes an authorized address
-     * @param _authorizedAddress The address to remove authorization from
-     */
-    function removeAuthorizedAddress(address _authorizedAddress) public onlyOwner {
-        authorizedAddresses[_authorizedAddress] = false;
-        emit AuthorizedAddressUpdated(_authorizedAddress, false);
-    }
 
     /**
      * @dev Internal function to get a user's total balance
@@ -515,6 +521,9 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
      * @return The total balance including staking points and deposited balance
      */
     function _getUserTotalBalance(address user) private view returns(uint256) {
+        if (!initialBalanceSet[user]) {
+            return INITIAL_BALANCE + userBalance[user] + spendableStakingPoints(user) + depositedBalance[user];
+        }
         return userBalance[user] + spendableStakingPoints(user) + depositedBalance[user];
     }
 
@@ -531,7 +540,6 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
         require(!isPaused, "Contract is paused");
         bytes32 requestHash = hashRequest(request);
         spender = recoverAddress(requestHash, signature);
-        require(authorizedAddresses[msg.sender], "Unauthorized address");
         require(getAvailableSpending(spender) >= request.amount, "Daily spending limit exceeded");
         require(_getUserTotalBalance(spender) >= request.amount, "Insufficient balance");
         require(nonces[spender][_hashTypedDataV4(keccak256(bytes(request.nonce)))] == false, "Nonce already used");
@@ -639,7 +647,13 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
      */
     function getMaxDailySpending(address user) public view returns(uint256) {
         // NOTE: using referenceUserBalance instead of userBalance to calculate daily limit because userBalance is updated after the transaction
-        uint256 dailySpending = (maxDailySpendingNumDen[0] * (referenceUserBalance[user] + getPointsEarnedFromStaking(user))) / maxDailySpendingNumDen[1];
+        uint256 dailySpending;
+        if (!initialBalanceSet[user]) {
+            dailySpending = (maxDailySpendingNumDen[0] * (INITIAL_BALANCE + getPointsEarnedFromStaking(user))) / maxDailySpendingNumDen[1];
+        }
+        else{
+            dailySpending = (maxDailySpendingNumDen[0] * (referenceUserBalance[user] + getPointsEarnedFromStaking(user))) / maxDailySpendingNumDen[1];
+        }
 
         return (dailySpending < maxDailySpendingCap) ? dailySpending : maxDailySpendingCap;
     }
@@ -663,7 +677,7 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
         bytes calldata signature
     ) external nonReentrant returns(address spender) {
         spender = verify(request, signature);
-        _spendTokens(spender, spender, request.amount);
+        _spendTokens(spender, spender, request.amount, msg.sender);
         return spender;
     }
 
@@ -676,11 +690,10 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
     ) nonReentrant external {
         address spender = tx.origin;
         require(!isPaused, "Contract is paused");
-        require(authorizedAddresses[msg.sender], "Unauthorized address");
         require(getAvailableSpending(spender) >= amount, "Daily spending limit exceeded");
         require(_getUserTotalBalance(spender) >= amount, "Insufficient balance");
 
-        _spendTokens(spender, spender, amount);
+        _spendTokens(spender, spender, amount, msg.sender);
     }
 
     /**
@@ -716,7 +729,6 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
         require(!isPaused, "Contract is paused");
         bytes32 requestHash = hashDelegatedRequest(request);
         spender = recoverAddress(requestHash, signature);
-        require(authorizedAddresses[msg.sender], "Unauthorized address");
         require(getAvailableSpending(request.owner) >= request.amount, "Daily spending limit exceeded");
         require(_getUserTotalBalance(request.owner) >= request.amount, "Insufficient balance");
         require(nonces[spender][_hashTypedDataV4(keccak256(bytes(request.nonce)))] == false, "Nonce already used");
@@ -753,7 +765,7 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
         address spender = verifyDelegated(request, signature);
         require(allowances[request.owner][spender] >= request.amount, "Insufficient allowance");
 
-        _spendTokens(request.owner, spender, request.amount);
+        _spendTokens(request.owner, spender, request.amount, msg.sender);
 
         nonces[spender][_hashTypedDataV4(keccak256(bytes(request.nonce)))] = true;
     }
@@ -772,9 +784,8 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
         require(getAvailableSpending(owner) >= amount, "Daily spending limit exceeded");
         require(_getUserTotalBalance(owner) >= amount, "Insufficient balance");
         require(allowances[owner][spender] >= amount, "Insufficient allowance");
-        require(authorizedAddresses[msg.sender], "Unauthorized address");
 
-        _spendTokens(owner, spender, amount);
+        _spendTokens(owner, spender, amount, msg.sender);
 
     }
 
@@ -784,8 +795,17 @@ contract OnchainPoints is Initializable, OwnableUpgradeable, UUPSUpgradeable, EI
      * @param spender The address of the spender
      * @param amount The amount of tokens to spend
      */
-    function _spendTokens(address owner, address spender, uint256 amount) private {
+    function _spendTokens(address owner, address spender, uint256 amount, address _spendingAddress) private {
+        
+        require(authorizedAddressesTotalSpendings[_spendingAddress] + amount <= authorizedAddressesTotalSpendingLimit, "Total spending limit exceeded");
+        authorizedAddressesTotalSpendings[_spendingAddress] += amount;
+
         uint256 userPoints = spendableStakingPoints(owner);
+        if (!initialBalanceSet[owner]) {
+            userBalance[owner] = INITIAL_BALANCE;
+            referenceUserBalance[owner] = INITIAL_BALANCE;
+            initialBalanceSet[owner] = true;
+        }
         
         // Check if the amount to spend is greater than available staking points
         if (amount > userPoints) {
